@@ -6,6 +6,7 @@ import { initializeDocument, readReviewBlocks, saveCandidate, sha256 } from '../
 import { exportBundle, persistRun, loadRun } from '../src/main/review/storage'
 import { DEFAULT_REVIEW_CONFIG, REVIEW_MODEL_NOTICE, WorkflowRun } from '../src/shared/reviewWorkflow'
 import { randomUUID } from 'node:crypto'
+const { loadDocx } = require('docx-edit')
 
 const NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 export async function makeReviewFixture(): Promise<Buffer> {
@@ -25,7 +26,10 @@ ${p('重复内容保持原样。')}${p('重复内容保持原样。')}${p('研�
 <w:p><w:r><w:t>带脚注</w:t><w:footnoteReference w:id="1"/></w:r></w:p>
 <w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText> TOC </w:instrText><w:fldChar w:fldCharType="end"/></w:r></w:p>
 <w:tbl><w:tr><w:tc>${p('表格原文')}</w:tc></w:tr></w:tbl>
-${p('表格后的段落。')}${p('参考文献')}${p('[1] Smith (2024). Original source.')}
+${p('表格后的段落。')}
+<w:p><w:r><w:t>拆分</w:t></w:r><w:r><w:t>片段</w:t></w:r><w:r><w:t>正常文字。</w:t></w:r></w:p>
+<w:p><w:r><w:t>研究CO</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="subscript"/></w:rPr><w:t>2</w:t></w:r><w:r><w:t>并进行分析。</w:t></w:r></w:p>
+${p('参考文献')}${p('[1] Smith (2024). Original source.')}
 <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:left="1440"/></w:sectPr>
 </w:body></w:document>`)
   return zip.generateAsync({ type: 'nodebuffer' })
@@ -86,12 +90,59 @@ describe('DOCX 实际读写、格式及原文版本保护（合成文件，不�
     const beforeZip = await JSZip.loadAsync(originalBytes), afterZip = await JSZip.loadAsync(await fs.readFile(moved))
     for (const [name, file] of Object.entries(beforeZip.files)) if (name !== 'word/document.xml' && !file.dir) expect(await afterZip.file(name)!.async('nodebuffer')).toEqual(await file.async('nodebuffer'))
   })
-  it('禁止跨混合字符格式改写、修改公式段落', async () => {
+  it('跨混合格式改写保留未修改文字的粗体及原有 run', async () => {
     const blocks = await readReviewBlocks(initial.originalPath)
-    const mixed = blocks.find(b => b.text === '粗体正常文字')!, formula = blocks.find(b => b.text.includes('公式如下'))!
-    const plan = (blockId: string, original: string) => ({ edits: [{ blockId, original, replacement: '修改', reason: '合成测试', issueIds: ['mock'] }], moves: [] as [], summary: '模拟' })
-    await expect(saveCandidate(initial.originalPath, path.dirname(initial.originalPath), 4, 'content', plan(mixed.id, mixed.text))).rejects.toThrow('格式边界')
-    await expect(saveCandidate(initial.originalPath, path.dirname(initial.originalPath), 4, 'content', plan(formula.id, '公式如下'))).rejects.toThrow('不可编辑')
+    const mixed = blocks.find(b => b.text === '粗体正常文字')!
+    const output = await saveCandidate(initial.originalPath, path.dirname(initial.originalPath), 4, 'content', {
+      edits: [{ blockId: mixed.id, original: mixed.text, replacement: '粗体常规文字', reason: '合成测试', issueIds: ['mock'] }], moves: [], summary: '模拟'
+    })
+    const doc = await loadDocx(output)
+    const para = doc.getBody().getParagraphs().find((p: any) => p.getText() === '粗体常规文字')
+    expect(para.getRuns().map((r: any) => r.getText())).toEqual(['粗体', '常规文字'])
+    expect(para.getRuns()[0].getStyle().bold).toBe(true)
+    expect((await readReviewBlocks(output)).find(b => b.id === mixed.id)?.text).toBe('粗体常规文字')
+  })
+  it('跨片段缩短内容后允许空文本节点，继续保存下一轮版本', async () => {
+    const blocks = await readReviewBlocks(initial.originalPath)
+    const mixed = blocks.find(b => b.text === '粗体正常文字')!
+    const output = await saveCandidate(initial.originalPath, path.dirname(initial.originalPath), 5, 'content', {
+      edits: [{ blockId: mixed.id, original: mixed.text, replacement: '修改', reason: '合成测试', issueIds: ['mock'] }], moves: [], summary: '模拟'
+    })
+    const doc = await loadDocx(output)
+    const para = doc.getBody().getParagraphs().find((p: any) => p.getText() === '修改')
+    expect(para.getRuns().map((r: any) => r.getText())).toEqual(['修改', ''])
+    expect(para.getRuns()[0].getStyle().bold).toBe(true)
+    const next = await saveCandidate(output, path.dirname(output), 6, 'content', {
+      edits: [{ blockId: mixed.id, original: '修改', replacement: '修改后文字', reason: '合成测试', issueIds: ['mock'] }], moves: [], summary: '模拟'
+    })
+    expect((await readReviewBlocks(next)).find(b => b.id === mixed.id)?.text).toBe('修改后文字')
+  })
+  it('同格式多片段替换支持新增首尾空格且保留其余部件', async () => {
+    const blocks = await readReviewBlocks(initial.originalPath)
+    const split = blocks.find(b => b.text === '拆分片段正常文字。')!
+    const output = await saveCandidate(initial.originalPath, path.dirname(initial.originalPath), 7, 'content', {
+      edits: [{ blockId: split.id, original: '拆分片段', replacement: ' 拆分 片段 ', reason: '合成测试', issueIds: ['mock'] }], moves: [], summary: '模拟'
+    })
+    expect((await readReviewBlocks(output)).find(b => b.id === split.id)?.text).toBe(' 拆分 片段 正常文字。')
+    const before = await JSZip.loadAsync(originalBytes), after = await JSZip.loadAsync(await fs.readFile(output))
+    for (const [name, file] of Object.entries(before.files)) if (name !== 'word/document.xml' && !file.dir) expect(await after.file(name)!.async('nodebuffer')).toEqual(await file.async('nodebuffer'))
+  })
+  it('跨下标修改时下标文字仍在原 run 中', async () => {
+    const blocks = await readReviewBlocks(initial.originalPath)
+    const subscript = blocks.find(b => b.text === '研究CO2并进行分析。')!
+    const output = await saveCandidate(initial.originalPath, path.dirname(initial.originalPath), 8, 'content', {
+      edits: [{ blockId: subscript.id, original: subscript.text, replacement: '考察CO2并分析其来源。', reason: '合成测试', issueIds: ['mock'] }], moves: [], summary: '模拟'
+    })
+    const doc = await loadDocx(output)
+    const para = doc.getBody().getParagraphs().find((p: any) => p.getText() === '考察CO2并分析其来源。')
+    expect(para.getRuns().map((r: any) => r.getText())).toEqual(['考察CO', '2', '并分析其来源。'])
+    expect(para.getRuns()[1].getStyle().vertAlign).toBe('subscript')
+  })
+  it('仍禁止修改公式段落', async () => {
+    const formula = (await readReviewBlocks(initial.originalPath)).find(b => b.text.includes('公式如下'))!
+    await expect(saveCandidate(initial.originalPath, path.dirname(initial.originalPath), 9, 'content', {
+      edits: [{ blockId: formula.id, original: '公式如下', replacement: '修改', reason: '合成测试', issueIds: ['mock'] }], moves: [], summary: '模拟'
+    })).rejects.toThrow('不可编辑')
   })
   it('拒绝覆盖原版本，外部篡改触发校验失败', async () => {
     await expect(saveCandidate(initial.originalPath, path.dirname(initial.originalPath), 1, 'content', { edits: [], moves: [], summary: '模拟' })).rejects.toThrow('禁止覆盖')

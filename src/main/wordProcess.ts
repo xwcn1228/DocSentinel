@@ -1,4 +1,5 @@
 const { loadDocx } = require('docx-edit')
+const { diffArrays } = require('diff')
 
 /** Exact, block-scoped edits for the review workflow. Preserve existing run boundaries. */
 export function applyExactInlineEdits(paraNode: any, edits: { original: string; replacement: string }[]): void {
@@ -9,16 +10,49 @@ export function applyExactInlineEdits(paraNode: any, edits: { original: string; 
     if (!edit.original || start < 0 || fullText.indexOf(edit.original, start + 1) >= 0)
       throw new Error('块内原文不唯一或不存在')
     const end = start + edit.original.length
-    if (!segments.some(s => start >= s.start && end <= s.end))
-      throw new Error('修改跨越文字格式边界；请缩小修改范围或人工处理')
     return { start, end, replaceText: edit.replacement }
   })
   for (let i = 0; i < located.length; i++)
     for (let j = i + 1; j < located.length; j++) {
       if (located[i].start < located[j].end && located[j].start < located[i].end) throw new Error('修改范围重叠')
     }
-  // Reuse the existing run-level writeback; do not set paragraph.props.text.
-  applyRunLevelEdits({ segments } as ParaSnapshot, located)
+  // Word may split even identically styled text into many w:t nodes. Diff the
+  // matched text first so unchanged characters stay in their original runs.
+  // Newly replaced text inherits the first changed run's formatting.
+  const changes = located.sort((a, b) => a.start - b.start).flatMap(edit => {
+    const result: RunTextEdit[] = []
+    let cursor = edit.start
+    let pending: RunTextEdit | undefined
+    const flush = () => {
+      if (pending) result.push(pending)
+      pending = undefined
+    }
+    // Code points avoid splitting surrogate pairs when only an emoji changes.
+    const parts: { value: string[]; added?: boolean; removed?: boolean }[] =
+      diffArrays(Array.from(fullText.slice(edit.start, edit.end)), Array.from(edit.replaceText))
+    for (const part of parts) {
+      const text = part.value.join('')
+      if (!part.added && !part.removed) {
+        flush()
+        cursor += text.length
+        continue
+      }
+      if (!pending) pending = {
+        start: cursor, end: cursor, replaceText: '',
+        // At the match start use the following character; otherwise insert
+        // after the preceding character, including at the paragraph end.
+        insertionAnchor: cursor === edit.start ? cursor : cursor - 1
+      }
+      if (part.removed) {
+        cursor += text.length
+        pending.end = cursor
+      } else pending.replaceText += text
+    }
+    flush()
+    return result
+  })
+  // Do not set paragraph.props.text: that redistributes text by run lengths.
+  applyRunLevelEdits({ segments } as ParaSnapshot, changes)
 }
 
 interface Replacement {
@@ -321,9 +355,17 @@ function applyNormalEdits(snapshot: ParaSnapshot, edits: { start: number; end: n
  * 导致的格式边界错位。替换文本整体写入匹配起点所在的片段
  * （该 run 承载错误首字符的格式），其余受影响片段仅删除被消耗的字符。
  */
+interface RunTextEdit {
+  start: number
+  end: number
+  replaceText: string
+  /** Original character whose run supplies the style for a pure insertion. */
+  insertionAnchor?: number
+}
+
 function applyRunLevelEdits(
   snapshot: ParaSnapshot,
-  edits: { start: number; end: number; replaceText: string }[]
+  edits: RunTextEdit[]
 ): void {
   if (snapshot.segments.length === 0) return
   const ordered = [...edits].sort((a, b) => a.start - b.start)
@@ -331,6 +373,14 @@ function applyRunLevelEdits(
     let out = ''
     let cursor = seg.start
     for (const edit of ordered) {
+      if (edit.start === edit.end) {
+        const anchor = edit.insertionAnchor ?? edit.start
+        if (anchor >= seg.start && anchor < seg.end) {
+          out += seg.text.slice(cursor - seg.start, edit.start - seg.start) + edit.replaceText
+          cursor = edit.end
+        }
+        continue
+      }
       if (edit.end <= seg.start || edit.start >= seg.end) continue
       const overlapStart = Math.max(edit.start, seg.start)
       const overlapEnd = Math.min(edit.end, seg.end)

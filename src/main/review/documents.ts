@@ -132,7 +132,17 @@ export async function saveCandidate(inputPath: string, directory: string, round:
   if (actual.length !== ordered.length || actual.some((e, i) => e.block.text !== ordered[i].text)) throw new Error('候选回读校验失败，未提交版本')
   const originalEntries = collect(original.toComponentTree(), original)
   const idsBefore = entries.map(e => e.block.id)
-  const stripText = (xml: string) => xml.replace(/(<w:t\b[^>]*>)[\s\S]*?(<\/w:t>)/g, '$1$2')
+  const stripText = (xml: string) => {
+    const parsed = new DOMParser().parseFromString(xml, 'application/xml')
+    for (const text of Array.from(parsed.getElementsByTagName('w:t')) as any[]) {
+      // Text edits may empty a run (<w:t/>) or require xml:space="preserve".
+      // Normalize only those text details; run styles and all other nodes
+      // must still match, and the exact text was checked above by readback.
+      while (text.firstChild) text.removeChild(text.firstChild)
+      text.removeAttribute('xml:space')
+    }
+    return new XMLSerializer().serializeToString(parsed)
+  }
   for (let i = 0; i < actual.length; i++) {
     const beforeEntry = originalEntries[idsBefore.indexOf(ordered[i].id)]
     const beforeXml = original.getNodeById(beforeEntry.node.id).source.toString()

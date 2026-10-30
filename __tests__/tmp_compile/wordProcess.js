@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.applyExactInlineEdits = applyExactInlineEdits;
 exports.replaceTextInDocx = replaceTextInDocx;
 const { loadDocx } = require('docx-edit');
+const { diffArrays } = require('diff');
 /** Exact, block-scoped edits for the review workflow. Preserve existing run boundaries. */
 function applyExactInlineEdits(paraNode, edits) {
     const segments = collectTextSegments(paraNode);
@@ -12,8 +13,6 @@ function applyExactInlineEdits(paraNode, edits) {
         if (!edit.original || start < 0 || fullText.indexOf(edit.original, start + 1) >= 0)
             throw new Error('块内原文不唯一或不存在');
         const end = start + edit.original.length;
-        if (!segments.some(s => start >= s.start && end <= s.end))
-            throw new Error('修改跨越文字格式边界；请缩小修改范围或人工处理');
         return { start, end, replaceText: edit.replacement };
     });
     for (let i = 0; i < located.length; i++)
@@ -21,8 +20,46 @@ function applyExactInlineEdits(paraNode, edits) {
             if (located[i].start < located[j].end && located[j].start < located[i].end)
                 throw new Error('修改范围重叠');
         }
-    // Reuse the existing run-level writeback; do not set paragraph.props.text.
-    applyRunLevelEdits({ segments }, located);
+    // Word may split even identically styled text into many w:t nodes. Diff the
+    // matched text first so unchanged characters stay in their original runs.
+    // Newly replaced text inherits the first changed run's formatting.
+    const changes = located.sort((a, b) => a.start - b.start).flatMap(edit => {
+        const result = [];
+        let cursor = edit.start;
+        let pending;
+        const flush = () => {
+            if (pending)
+                result.push(pending);
+            pending = undefined;
+        };
+        // Code points avoid splitting surrogate pairs when only an emoji changes.
+        const parts = diffArrays(Array.from(fullText.slice(edit.start, edit.end)), Array.from(edit.replaceText));
+        for (const part of parts) {
+            const text = part.value.join('');
+            if (!part.added && !part.removed) {
+                flush();
+                cursor += text.length;
+                continue;
+            }
+            if (!pending)
+                pending = {
+                    start: cursor, end: cursor, replaceText: '',
+                    // At the match start use the following character; otherwise insert
+                    // after the preceding character, including at the paragraph end.
+                    insertionAnchor: cursor === edit.start ? cursor : cursor - 1
+                };
+            if (part.removed) {
+                cursor += text.length;
+                pending.end = cursor;
+            }
+            else
+                pending.replaceText += text;
+        }
+        flush();
+        return result;
+    });
+    // Do not set paragraph.props.text: that redistributes text by run lengths.
+    applyRunLevelEdits({ segments }, changes);
 }
 function escapeRegExp(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -262,14 +299,6 @@ function applyNormalEdits(snapshot, edits) {
     }
     snapshot.node.props.text = text;
 }
-/**
- * 在 run 级段落上按 start 升序应用多处编辑，保留每个 run 的格式。
- *
- * 核心原理与单处替换版一致：仅修改 w:t 文本节点的 props.text，
- * 不修改 paragraph.props.text，避免 patch 引擎按字符数重分配文本
- * 导致的格式边界错位。替换文本整体写入匹配起点所在的片段
- * （该 run 承载错误首字符的格式），其余受影响片段仅删除被消耗的字符。
- */
 function applyRunLevelEdits(snapshot, edits) {
     if (snapshot.segments.length === 0)
         return;
@@ -278,6 +307,14 @@ function applyRunLevelEdits(snapshot, edits) {
         let out = '';
         let cursor = seg.start;
         for (const edit of ordered) {
+            if (edit.start === edit.end) {
+                const anchor = edit.insertionAnchor ?? edit.start;
+                if (anchor >= seg.start && anchor < seg.end) {
+                    out += seg.text.slice(cursor - seg.start, edit.start - seg.start) + edit.replaceText;
+                    cursor = edit.end;
+                }
+                continue;
+            }
             if (edit.end <= seg.start || edit.start >= seg.end)
                 continue;
             const overlapStart = Math.max(edit.start, seg.start);

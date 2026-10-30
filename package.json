@@ -65,6 +65,7 @@
     "@google/generative-ai": "^0.24.1",
     "@vueuse/core": "^14.0.0",
     "axios": "^1.11.0",
+    "diff": "^4.0.2",
     "docx-edit": "^0.3.2",
     "element-plus": "^2.11.1",
     "jszip": "^3.10.1",
