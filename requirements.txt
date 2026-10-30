@@ -1,0 +1,81 @@
+# ============================================================
+# AutoDocxProofreading 依赖清单
+# ------------------------------------------------------------
+# 本项目是 Node.js 项目：安装依赖请执行 `npm install`，
+# 权威版本定义在 package.json，本文件是其人工可读的说明文档，
+# 修改依赖时请同步更新两处。
+#
+# 环境要求：
+#   Node.js >= 24（见 .nvmrc 与 package.json engines；
+#   Windows nvm 切换：nvm use 24.19.0）
+#   npm >= 8
+# ============================================================
+
+# ---------- 运行时依赖（dependencies）----------
+
+# 大模型 API 客户端（B/C 双路审查的模型调用通道）
+openai@^5.19.1                  # OpenAI 及一切兼容 OpenAI 规范的中转/第三方接口（主力通道）
+@anthropic-ai/sdk@^0.82.0       # Anthropic Claude 接口
+@google/genai@^1.17.0           # Google Gemini 接口（迁移预留）
+@google/generative-ai@^0.24.1   # Google Gemini 接口（当前使用）
+
+# Word(docx) 文档处理（审查候选版本的原格式读写）
+docx-edit@^0.3.2                # docx 虚拟树读取与回写（公式/脚注/角标/格式保留）
+jszip@^3.10.1                   # docx 本质是 zip 包，解包/打包底层依赖（版本包导出）
+
+# 前端框架与 UI（渲染进程，已由构建按需打包）
+vue@^3.4.27                     # 前端框架
+vue-router@^4.5.1               # 页面路由
+pinia@^3.0.3                    # 状态管理
+pinia-plugin-persistedstate@^4.5.0  # 状态持久化（API 选择/皮肤/语言）
+element-plus@^2.11.1            # UI 组件库（unplugin-vue-components 按需引入）
+vue-i18n@^11.3.0                # 中英双语国际化
+@vueuse/core@^14.0.0            # Vue 组合式工具函数库
+
+# 本地存储（API 配置库）
+sqlite@^5.1.1                   # sqlite 异步封装
+sqlite3@^5.1.7                  # sqlite 原生绑定（Windows 安装见下方注意事项）
+
+# 工具库
+axios@^1.11.0                   # HTTP 请求（API 测试连接等）
+
+# ---------- 开发依赖（devDependencies，运行时不需要）----------
+
+# 桌面应用构建链
+electron@30.0.2                 # 桌面容器（主进程/渲染进程）
+electron-vite@^2.3.0            # Electron + Vite 构建工具
+vite@^5.0.12                    # 前端构建
+electron-builder@^25.1.8        # 安装包打包（electron-builder.yml）
+@electron/fuses@^1.8.0          # Electron 二进制特性开关
+@vitejs/plugin-vue@^5.0.4       # Vite 的 Vue 单文件组件支持
+@intlify/unplugin-vue-i18n@^11.0.7       # i18n 编译优化
+unplugin-vue-components@^32.1.0          # Element Plus 按需引入
+
+# 语言与测试
+typescript@^5.6.3               # 类型系统
+ts-node@^10.0.0                 # 直接运行 TS 脚本
+vitest@^1.6.0                   # 单元测试框架（npm test）
+
+# 代码规范与工程化
+eslint@^8.0.1                   # 代码检查（含 vue / typescript / import 插件）
+prettier@^3.2.5                 # 代码格式化
+husky@^9.0.11                   # Git 钩子
+lint-staged@^15.2.2             # 只检查暂存区文件
+commitlint + @commitlint/config-conventional  # 提交信息规范
+git-cz@^4.9.0                   # 交互式规范提交（npm run commit）
+standard-version@^9.5.0         # 版本号与 CHANGELOG 管理
+@types/node@^24.3.1             # Node 类型定义
+
+# ---------- 数据与配置文件位置 ----------
+# %APPDATA%\AutoDocxProofreading\
+#   ├── data\app.db                     API 配置库（密钥加密存储）
+#   ├── heuristic-phrases.json          启发式短语表（可自行补充，重启生效）
+#   └── dual-review-runs\<任务ID>\      每次审查的原文/候选/报告/完整数据
+
+# ---------- 平台注意事项 ----------
+# sqlite3@5.1.7 的预编译二进制从 GitHub Releases 下载：
+#   1) 直连失败时走代理：HTTPS_PROXY=http://127.0.0.1:7890 npm install
+#   2) 仍失败时手动安装：npm install --ignore-scripts 后到 node_modules/sqlite3 执行
+#      npx prebuild-install -r napi，或直接解压对应平台 tar.gz 到 build/Release/
+# electron 二进制可用国内镜像：
+#   cd node_modules/electron && ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ node install.js

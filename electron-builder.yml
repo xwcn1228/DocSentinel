@@ -1,0 +1,87 @@
+appId: com.docsentinel.app
+productName: DocSentinel
+
+directories:
+  # electron-builder 产物输出目录（替代原 forge 的 out/）
+  # 放到项目外，避免 VS Code / 杀软监视工作区时锁定 win-unpacked\resources\app.asar
+  output: ../release
+  buildResources: build
+
+# 进 asar 的文件：electron-vite 构建产物 + package.json
+files:
+  - out/**/*
+  - package.json
+  # 方案A：排除旧 electron-forge 遗留的完整产物（内含一个 233MB 的旧 app.asar），
+  # 否则会被 out/**/* 无差别匹配并塞进新 asar。真正的 electron-vite 产物在 out/{main,preload,renderer}
+  - '!out/AutoDocxProofreading-win32-x64/**'
+  - '!**/.vite/**'
+  # 排除 devDependencies 的传递依赖 / 不必要的二进制，减小体积并避免扫描读取问题
+  - '!**/node_modules/@napi-rs/**'
+  - '!**/node_modules/@intlify/bundle-utils/**'
+  - '!**/node_modules/{eslint,eslint-*,typescript,@typescript-eslint,@vitejs,electron-vite,electron-builder,vite,vitest,prettier,standard-version,husky,lint-staged,git-cz,@commitlint,@electron}/**'
+  # source map 在生产环境无用，且常被杀软锁定导致复制失败，一律排除
+  - '!**/*.map'
+  - '!**/node_modules/**/{esbuild.exe,*.md,*.markdown,*.ts,*.flow,LICENSE*,*.coffee,*.tar.gz}'
+  # 方案G：渲染进程专属依赖排除（~93 包，asar 约减 30MB）。
+  # 原理：renderer 代码已被 vite 全量打进 out/renderer 的 chunk，运行时不读 node_modules；
+  # 这些包只被 .vue/渲染层 import，主进程产物（out/main 实际 require 清单 + 全量字符串扫描）
+  # 已验证零引用。清单由「主进程依赖闭包」脚本计算：保留闭包外的全部包即排除项。
+  # ⚠️ 维护约定：往 src/main 新增第三方依赖后若启动报 Cannot find module，先核对本列表是否误伤。
+  # 注：@google/genai 及其 google-auth-library/gtoken/ws 等依赖链按批次4决策保留（迁移预留），未列入。
+  - '!**/node_modules/@babel/{helper-string-parser,helper-validator-identifier,parser,types}/**'
+  - '!**/node_modules/@ctrl/tinycolor/**'
+  - '!**/node_modules/@element-plus/icons-vue/**'
+  - '!**/node_modules/@floating-ui/{core,dom,utils}/**'
+  - '!**/node_modules/@intlify/{core-base,devtools-types,message-compiler,shared}/**'
+  - '!**/node_modules/@jridgewell/sourcemap-codec/**'
+  - '!**/node_modules/@popperjs/core/**'
+  - '!**/node_modules/@vue/{compiler-core,compiler-dom,compiler-sfc,compiler-ssr,devtools-api,devtools-kit,devtools-shared,reactivity,runtime-core,runtime-dom,server-renderer,shared}/**'
+  - '!**/node_modules/@vueuse/{core,metadata,shared}/**'
+  - '!**/node_modules/{async-validator,asynckit,axios,bezier-easing,birpc,call-bind-apply-helpers,combined-stream,copy-anything,core-util-is,csstype,dayjs,deep-pick-omit,defu,delayed-stream,destr,docx-preview}/**'
+  - '!**/node_modules/{dunder-proto,element-plus,entities,es-define-property,es-errors,es-object-atoms,es-set-tostringtag,escape-html,estree-walker,follow-redirects,form-data,function-bind,get-intrinsic,get-proto,gopd,has-symbols}/**'
+  - '!**/node_modules/{has-tostringtag,hasown,hookable,is-what,lodash,lodash-es,lodash-unified,magic-string,math-intrinsics,memoize-one,mime-db,mime-types,mitt,nanoid,normalize-wheel-es,perfect-debounce}/**'
+  - '!**/node_modules/{picocolors,pinia,pinia-plugin-persistedstate,postcss,process-nextick-args,proxy-from-env,rfdc,source-map-js,speakingurl,superjson,vue,vue-demi,vue-i18n,vue-router,vue-scrollto}/**'
+
+# 原生模块必须解包出 asar（.node 无法在 asar 内加载）：sqlite3 的原生绑定
+asarUnpack:
+  - '**/node_modules/sqlite3/**'
+
+asar: true
+
+# Electron 默认带 55 种界面语言 .pak（~38MB），本应用仅中英双语 → 只保留两种
+electronLanguages:
+  - zh-CN
+  - en-US
+
+# 放到 resources/ 下（asar 外），供主进程通过 process.resourcesPath 读取
+extraResources:
+  # 窗口图标：main.ts 读取 process.resourcesPath/assets/logo.ico。
+  # 精确列出 ico（运行时用）与 icns（将来 mac 打包用）；
+  # README 文档截图与根目录 logo.png 不进安装包；界面使用 src/renderer/assets/logo.png
+  - from: assets
+    to: assets
+    filter: ['logo.ico', 'logo.icns']
+
+win:
+  # 方案F：只产出 NSIS 安装器，去掉 portable 便携版。
+  # 两者内容完全相同（同一份 win-unpacked 经不同压缩封装），保留两个会让发布目录体积翻倍，
+  # 且绝大多数用户通过 NSIS 安装。如未来确需免安装版，再加回 portable target 即可。
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: assets/logo.ico
+
+nsis:
+  # 显示完整安装向导（非 Squirrel 一键安装）
+  oneClick: false
+  # 按用户安装，无需管理员权限
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: DocSentinel
+
+# 在打包后、签名前 flip Electron Fuses（替代原 forge FusesPlugin）
+# 注: electron-builder 25.x 不支持声明式 electronFuses 配置项，需用 afterPack 脚本
+afterPack: ./scripts/afterPack.js
